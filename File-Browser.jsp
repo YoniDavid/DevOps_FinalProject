@@ -1,6 +1,5 @@
-<%--
+<%-- 
 	jsp File browser 1.2.1
-
 	nikallass added OS check, so shell can be executed on Windows and Linux without modifying now.
 	
 	Copyright (C) 2003-2006 Boris von Loesch
