@@ -38,7 +38,6 @@
 	private static final boolean READ_ONLY = false;
 	//If true, uploads are allowed even if READ_ONLY = true
 	private static final boolean ALLOW_UPLOAD = true;
-
     //Allow browsing and file manipulation only in certain directories
 	private static final boolean RESTRICT_BROWSING = false;
     //If true, the user is allowed to browse only in RESTRICT_PATH,
@@ -47,7 +46,6 @@
     //Paths, sperated by semicolon
     //private static final String RESTRICT_PATH = "C:\\CODE;E:\\"; //Win32: Case important!!
 	private static final String RESTRICT_PATH = "/etc;/var";
-
     //The refresh time in seconds of the upload monitor window
 	private static final int UPLOAD_MONITOR_REFRESH = 2;
 	//The number of colums for the edit field
@@ -81,18 +79,15 @@
 	 * an empty removable drive (See KNOWN BUGS in Readme.txt).
 	 */
 	private static final String[] FORBIDDEN_DRIVES = {"a:\\"};
-
 	/**
 	 * Command of the shell interpreter and the parameter to run a programm
 	 */
 	private static final String[] WINDOWS_COMMAND_INTERPRETER = {"cmd", "/C"}; // Dos,Windows
 	private static final String[] LINUX_COMMAND_INTERPRETER = {"/bin/sh","-c"}; 	// Unix
-
 	/**
 	 * Max time in ms a process is allowed to run, before it will be terminated
 	 */
 	private static final long MAX_PROCESS_RUNNING_TIME = 30 * 1000; //30 seconds
-
 	//Button names
 	private static final String SAVE_AS_ZIP = "Download selected files as (z)ip";
 	private static final String RENAME_FILE = "(R)ename File";
@@ -103,35 +98,224 @@
 	private static final String COPY_FILES = "Cop(y) Files";
 	private static final String LAUNCH_COMMAND = "(L)aunch external program";
 	private static final String UPLOAD_FILES = "Upload";
-
 	//Normally you should not change anything after this line
 	//----------------------------------------------------------------------------------
 	//Change this to locate the tempfile directory for upload (not longer needed)
 	private static String tempdir = ".";
 	private static String VERSION_NR = "1.2";
 	private static DateFormat dateFormat = DateFormat.getDateTimeInstance();
-
 	public class UplInfo {
-
 		public long totalSize;
 		public long currSize;
 		public long starttime;
 		public boolean aborted;
-
 		public UplInfo() {
 			totalSize = 0l;
 			currSize = 0l;
 			starttime = System.currentTimeMillis();
 			aborted = false;
 		}
-
 		public UplInfo(int size) {
 			totalSize = size;
 			currSize = 0;
 			starttime = System.currentTimeMillis();
 			aborted = false;
 		}
-
+		public String getUprate() {
+			long time = System.currentTimeMillis() - starttime;
+			if (time != 0) {
+				long uprate = currSize * 1000 / time;
+				return convertFileSize(uprate) + "/s";
+			}
+			else return "n/a";
+		}
+		public int getPercent() {
+			if (totalSize == 0) return 0;
+			else return (int) (currSize * 100 / totalSize);
+		}
+		public String getTimeElapsed() {
+			long time = (System.currentTimeMillis() - starttime) / 1000l;
+			if (time - 60l >= 0){
+				if (time % 60 >=10) return time / 60 + ":" + (time % 60) + "m";
+				else return time / 60 + ":0" + (time % 60) + "m";
+			}
+			else return time<10 ? "0" + time + "s": time + "s";
+		}
+		public String getTimeEstimated() {
+			if (currSize == 0) return "n/a";
+			long time = System.currentTimeMillis() - starttime;
+			time = totalSize * time / currSize;
+			time /= 1000l;
+			if (time - 60l >= 0){
+				if (time % 60 >=10) return time / 60 + ":" + (time % 60) + "m";
+				else return time / 60 + ":0" + (time % 60) + "m";
+			}
+			else return time<10 ? "0" + time + "s": time + "s";
+		}
+	}
+	public class FileInfo {
+		public String name = null, clientFileName = null, fileContentType = null;
+		private byte[] fileContents = null;
+		public File file = null;
+		public StringBuffer sb = new StringBuffer(100);
+		public void setFileContents(byte[] aByteArray) {
+			fileContents = new byte[aByteArray.length];
+			System.arraycopy(aByteArray, 0, fileContents, 0, aByteArray.length);
+		}
+	}
+	public static class UploadMonitor {
+		static Hashtable uploadTable = new Hashtable();
+		static void set(String fName, UplInfo info) {
+			uploadTable.put(fName, info);
+		}
+		static void remove(String fName) {
+			uploadTable.remove(fName);
+		}
+		static UplInfo getInfo(String fName) {
+			UplInfo info = (UplInfo) uploadTable.get(fName);
+			return info;
+		}
+	}
+	// A Class with methods used to process a ServletInputStream
+	public class HttpMultiPartParser {
+		//private final String lineSeparator = System.getProperty("line.separator", "\n");
+		private final int ONE_MB = 1024 * 1;
+		public Hashtable processData(ServletInputStream is, String boundary, String saveInDir,
+				int clength) throws IllegalArgumentException, IOException {
+			if (is == null) throw new IllegalArgumentException("InputStream");
+			if (boundary == null || boundary.trim().length() < 1) throw new IllegalArgumentException(
+					"\"" + boundary + "\" is an illegal boundary indicator");
+			boundary = "--" + boundary;
+			StringTokenizer stLine = null, stFields = null;
+			FileInfo fileInfo = null;
+			Hashtable dataTable = new Hashtable(5);
+			String line = null, field = null, paramName = null;
+			boolean saveFiles = (saveInDir != null && saveInDir.trim().length() > 0);
+			boolean isFile = false;
+			if (saveFiles) { // Create the required directory (including parent dirs)
+				File f = new File(saveInDir);
+				f.mkdirs();
+			}
+			line = getLine(is);
+			if (line == null || !line.startsWith(boundary)) throw new IOException(
+					"Boundary not found; boundary = " + boundary + ", line = " + line);
+			while (line != null) {
+				if (line == null || !line.startsWith(boundary)) return dataTable;
+				line = getLine(is);
+				if (line == null) return dataTable;
+				stLine = new StringTokenizer(line, ";\r\n");
+				if (stLine.countTokens() < 2) throw new IllegalArgumentException(
+						"Bad data in second line");
+				line = stLine.nextToken().toLowerCase();
+				if (line.indexOf("form-data") < 0) throw new IllegalArgumentException(
+						"Bad data in second line");
+				stFields = new StringTokenizer(stLine.nextToken(), "=\"");
+				if (stFields.countTokens() < 2) throw new IllegalArgumentException(
+						"Bad data in second line");
+				fileInfo = new FileInfo();
+				stFields.nextToken();
+				paramName = stFields.nextToken();
+				isFile = false;
+				if (stLine.hasMoreTokens()) {
+					field = stLine.nextToken();
+					stFields = new StringTokenizer(field, "=\"");
+					if (stFields.countTokens() > 1) {
+						if (stFields.nextToken().trim().equalsIgnoreCase("filename")) {
+							fileInfo.name = paramName;
+							String value = stFields.nextToken();
+							if (value != null && value.trim().length() > 0) {
+								fileInfo.clientFileName = value;
+								isFile = true;
+							}
+							else {
+								line = getLine(is); // Skip "Content-Type:" line
+								line = getLine(is); // Skip blank line
+								line = getLine(is); // Skip blank line
+								line = getLine(is); // Position to boundary line
+								continue;
+							}
+						}
+					}
+					else if (field.toLowerCase().indexOf("filename") >= 0) {
+						line = getLine(is); // Skip "Content-Type:" line
+						line = getLine(is); // Skip blank line
+						line = getLine(is); // Skip blank line
+						line = getLine(is); // Position to boundary line
+						continue;
+					}
+				}
+				boolean skipBlankLine = true;
+				if (isFile) {
+					line = getLine(is);
+					if (line == null) return dataTable;
+					if (line.trim().length() < 1) skipBlankLine = false;
+					else {
+						stLine = new StringTokenizer(line, ": ");
+						if (stLine.countTokens() < 2) throw new IllegalArgumentException(
+								"Bad data in third line");
+						stLine.nextToken(); // Content-Type
+						fileInfo.fileContentType = stLine.nextToken();
+					}
+				}
+				if (skipBlankLine) {
+					line = getLine(is);
+					if (line == null) return dataTable;
+				}
+				if (!isFile) {
+					line = getLine(is);
+					if (line == null) return dataTable;
+					dataTable.put(paramName, line);
+					// If parameter is dir, change saveInDir to dir
+					if (paramName.equals("dir")) saveInDir = line;
+					line = getLine(is);
+					continue;
+				}
+				try {
+					UplInfo uplInfo = new UplInfo(clength);
+					UploadMonitor.set(fileInfo.clientFileName, uplInfo);
+					OutputStream os = null;
+					String path = null;
+					if (saveFiles) os = new FileOutputStream(path = getFileName(saveInDir,
+							fileInfo.clientFileName));
+					else os = new ByteArrayOutputStream(ONE_MB);
+					boolean readingContent = true;
+					byte previousLine[] = new byte[2 * ONE_MB];
+					byte temp[] = null;
+					byte currentLine[] = new byte[2 * ONE_MB];
+					int read, read3;
+					if ((read = is.readLine(previousLine, 0, previousLine.length)) == -1) {
+						line = null;
+						break;
+					}
+					while (readingContent) {
+						if ((read3 = is.readLine(currentLine, 0, currentLine.length)) == -1) {
+							line = null;
+							uplInfo.aborted = true;
+							break;
+						}
+						if (compareBoundary(boundary, currentLine)) {
+							os.write(previousLine, 0, read - 2);
+							line = new String(currentLine, 0, read3);
+							break;
+						}
+						else {
+							os.write(previousLine, 0, read);
+							uplInfo.currSize += read;
+							temp = currentLine;
+							currentLine = previousLine;
+							previousLine = temp;
+							read = read3;
+						}//end else
+					}//end while
+					os.flush();
+					os.close();
+					if (!saveFiles) {
+						ByteArrayOutputStream baos = (ByteArrayOutputStream) os;
+						fileInfo.setFileContents(baos.toByteArray());
+					}
+					else fileInfo.file = new File(path);
+					dataTable.put(paramName, fileInfo);
+					uplInfo.currSize = uplInfo.totalSize;
 				}//end try
 				catch (IOException e) {
 					throw e;
@@ -139,7 +323,6 @@
 			}
 			return dataTable;
 		}
-
 		/**
 		 * Compares boundary string to byte array
 		 */
@@ -149,7 +332,6 @@
 				if ((byte) boundary.charAt(i) != ba[i]) return false;
 			return true;
 		}
-
 		/** Convenience method to read HTTP header lines */
 		private synchronized String getLine(ServletInputStream sis) throws IOException {
 			byte b[] = new byte[1024];
@@ -161,7 +343,6 @@
 			}
 			return line;
 		}
-
 		public String getFileName(String dir, String fileName) throws IllegalArgumentException {
 			String path = null;
 			if (dir == null || fileName == null) throw new IllegalArgumentException(
@@ -177,20 +358,16 @@
 			else return path.replace('/', File.separatorChar);
 		}
 	} //End of class HttpMultiPartParser
-
 	/**
 	 * This class is a comparator to sort the filenames and dirs
 	 */
 	class FileComp implements Comparator {
-
 		int mode;
 		int sign;
-
 		FileComp() {
 			this.mode = 1;
 			this.sign = 1;
 		}
-
 		/**
 		 * @param mode sort by 1=Filename, 2=Size, 3=Date, 4=Type
 		 * The default sorting method is by Name
@@ -206,7 +383,6 @@
 				this.sign = 1;
 			}
 		}
-
 		public int compare(Object o1, Object o2) {
 			File f1 = (File) o1;
 			File f2 = (File) o2;
@@ -272,23 +448,18 @@
 			}
 		}
 	}
-
 	/**
 	 * Wrapperclass to wrap an OutputStream around a Writer
 	 */
 	class Writer2Stream extends OutputStream {
-
 		Writer out;
-
 		Writer2Stream(Writer w) {
 			super();
 			out = w;
 		}
-
 		public void write(int i) throws IOException {
 			out.write(i);
 		}
-
 		public void write(byte[] b) throws IOException {
 			for (int i = 0; i < b.length; i++) {
 				int n = b[i];
@@ -297,7 +468,6 @@
 				out.write(n);
 			}
 		}
-
 		public void write(byte[] b, int off, int len) throws IOException {
 			for (int i = off; i < off + len; i++) {
 				int n = b[i];
@@ -306,7 +476,6 @@
 			}
 		}
 	} //End of class Writer2Stream
-
 	static Vector expandFileList(String[] files, boolean inclDirs) {
 		Vector v = new Vector();
 		if (files == null) return v;
@@ -326,7 +495,6 @@
 		}
 		return v;
 	}
-
 	/**
 	 * Method to build an absolute path
 	 * @param dir the root dir
@@ -343,7 +511,6 @@
 		else new_dir = name;
 		return new_dir;
 	}
-
 	/**
 	 * This Method converts a byte size in a kbytes or Mbytes size, depending on the size
 	 *     @param size The size in bytes
@@ -365,7 +532,6 @@
 		if (aftercomma.length() == 1) aftercomma = "0" + aftercomma;
 		return size / divisor + "." + aftercomma + " " + unit;
 	}
-
 	/**
 	 * Copies all data from in to out
 	 * 	@param in the input stream
@@ -377,7 +543,6 @@
 		in.close();
 		out.close();
 	}
-
 	/**
 	 * Copies all data from in to out
 	 * 	@param in the input stream
@@ -390,7 +555,6 @@
 		while ((b = in.read(buffer)) != -1)
 			out.write(buffer, 0, b);
 	}
-
 	/**
 	 * Returns the Mime Type of the file, depending on the extension of the filename
 	 */
@@ -418,7 +582,6 @@
 		else if (fName.endsWith(".ogg")) return "audio/ogg";
 		else return "text/plain";
 	}
-
 	/**
 	 * Converts some important chars (int) to the corresponding html string
 	 */
@@ -429,7 +592,6 @@
 		else if (i == '"') return "&quot;";
 		else return "" + (char) i;
 	}
-
 	/**
 	 * Converts a normal string to a html conform string
 	 */
@@ -440,7 +602,6 @@
 		}
 		return buf.toString();
 	}
-
 	/**
 	 * Starts a native process on the server
 	 * 	@param command the command to start the process
@@ -506,7 +667,6 @@
 		}
 		return ret.toString();
 	}
-
 	/**
 	 * Converts a dir string to a linked dir string
 	 * 	@param dir the directory string (e.g. /usr/local/httpd)
@@ -532,7 +692,6 @@
 		else buf.insert(0, f.getAbsolutePath());
 		return buf.toString();
 	}
-
 	/**
 	 *	Returns true if the given filename tends towards a packed file
 	 */
@@ -541,7 +700,6 @@
 				|| (gz && name.toLowerCase().endsWith(".gz")) || name.toLowerCase()
 				.endsWith(".war"));
 	}
-
 	/**
 	 *	If RESTRICT_BROWSING = true this method checks, whether the path is allowed or not
 	 */
@@ -557,9 +715,7 @@
 		}
 		else return true;
 	}
-
 	//---------------------------------------------------------------------------------------------------------------
-
 	%>
 <%
 		//Get the current browsing directory
@@ -585,7 +741,6 @@
 			var check = false;
 			<%// Disables the checkbox feature %>
 			function dis(){check = true;}
-
 			var DOM = 0, MS = 0, OP = 0, b = 0;
 			<%// Determine the browser type %>
 			function CheckBrowser(){
@@ -706,7 +861,6 @@
 					document.getElementById("but_Del").click();
 				}
 			}
-
 			function popUp(URL){
 				fname = document.getElementsByName("myFile")[0].value;
 				if (fname != "")
@@ -1002,7 +1156,6 @@ Upload finished.
 				request.setAttribute("dir", null);
 			}
 		}
-
 		//Click on a filename, special viewer (zip+jar file)
 		else if (request.getParameter("file") != null) {
 			File f = new File(request.getParameter("file"));
@@ -1037,7 +1190,6 @@ Upload finished.
 									+ convertFileSize(entry.getCompressedSize()) + "</td><td>"
 									+ ratio + "%" + "</td><td>"
 									+ dateFormat.format(new Date(entry.getTime())) + "</td></tr>");
-
 						}
 					}
 					zf.close();
@@ -1148,7 +1300,6 @@ Upload finished.
                 //No File directory is shown
                 request.setAttribute("dir", null);
                 dir_view = false;
-
 %></textarea><br /><br />
 <table class="formular">
 	<input type="hidden" name="nfile" value="<%= request.getParameter("editfile")%>">
@@ -1267,7 +1418,22 @@ Upload finished.
 								&& new File(root + File.separator + entry.getName()).exists()) {
 							request.setAttribute("error", "Cannot unpack " + f.getName()
 									+ ", File " + entry.getName() + " already exists.");
-,
+							error = true;
+							break;
+						}
+					}
+					if (!error) {
+						//Unpack File
+						entries = zf.entries();
+						byte buffer[] = new byte[0xffff];
+						while (entries.hasMoreElements()) {
+							ZipEntry entry = (ZipEntry) entries.nextElement();
+							File n = new File(root + File.separator + entry.getName());
+							if (entry.isDirectory()) n.mkdirs();
+							else {
+								n.getParentFile().mkdirs();
+								n.createNewFile();
+								copyStreams(zf.getInputStream(entry), new FileOutputStream(n),
 										buffer);
 							}
 						}
@@ -1304,7 +1470,17 @@ Upload finished.
 							+ ". Deletion aborted");
 					error = true;
 					break;
-eter("cr_dir");
+				}
+			}
+			if ((!error) && (v.size() > 1)) request.setAttribute("message", "All files deleted");
+			else if ((!error) && (v.size() > 0)) request.setAttribute("message", "File deleted");
+			else if (!error) request.setAttribute("error", "No files selected");
+		}
+		// Create Directory
+		else if ((request.getParameter("Submit") != null)
+				&& (request.getParameter("Submit").equals(CREATE_DIR))) {
+			String dir = "" + request.getAttribute("dir");
+			String dir_name = request.getParameter("cr_dir");
 			String new_dir = getDir(dir, dir_name);
             if (!isAllowed(new File(new_dir), true)){
                 request.setAttribute("error", "You are not allowed to access " + new_dir);
@@ -1475,7 +1651,6 @@ eter("cr_dir");
 					String path = null;
 					if (application.getRealPath(request.getRequestURI()) != null) path = new File(
 							application.getRealPath(request.getRequestURI())).getParent();
-
 					if (path == null) // handle the case were we are not in a directory (ex: war file)
 					path = new File(".").getAbsolutePath();
 					f = new File(path);
